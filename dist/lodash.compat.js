@@ -55,7 +55,9 @@
 
   /** Used to match HTML entities and HTML characters. */
   var reEscapedHtml = /&(?:amp|lt|gt|quot|#39|#96);/g,
-      reUnescapedHtml = /[&<>"'`]/g;
+      reUnescapedHtml = /[&<>"'`]/g,
+      reHasEscapedHtml = RegExp(reEscapedHtml.source),
+      reHasUnescapedHtml = RegExp(reUnescapedHtml.source);
 
   /** Used to match template delimiters. */
   var reEscape = /<%-([\s\S]+?)%>/g,
@@ -92,7 +94,8 @@
    * See this [article on `RegExp` characters](http://www.regular-expressions.info/characters.html#special)
    * for more details.
    */
-  var reRegExpChars = /[.*+?^${}()|[\]\/\\]/g;
+  var reRegExpChars = /[.*+?^${}()|[\]\/\\]/g,
+      reHasRegExpChars = RegExp(reRegExpChars.source);
 
   /** Used to detect functions containing a `this` reference. */
   var reThis = /\bthis\b/;
@@ -285,8 +288,8 @@
   /*--------------------------------------------------------------------------*/
 
   /**
-   * A specialized version of `_.forEach` for arrays without support for
-   * callback shorthands or `this` binding.
+   * A specialized version of `_.forEach` for arrays without support for callback
+   * shorthands or `this` binding.
    *
    * @private
    * @param {Array} array The array to iterate over.
@@ -966,7 +969,8 @@
 
     /** Used as references for the max length and index of an array. */
     var MAX_ARRAY_LENGTH = Math.pow(2, 32) - 1,
-        MAX_ARRAY_INDEX =  MAX_ARRAY_LENGTH - 1;
+        MAX_ARRAY_INDEX =  MAX_ARRAY_LENGTH - 1,
+        HALF_MAX_ARRAY_LENGTH = MAX_ARRAY_LENGTH >>> 1;
 
     /** Used as the size, in bytes, of each Float64Array element. */
     var FLOAT64_BYTES_PER_ELEMENT = Float64Array ? Float64Array.BYTES_PER_ELEMENT : 0;
@@ -1013,8 +1017,16 @@
 
     /**
      * Creates a `lodash` object which wraps `value` to enable intuitive chaining.
-     * The execution of chained methods is deferred until `_#value` is implicitly
-     * or explicitly called. Explicit chaining may be enabled by using `_.chain`.
+     * Methods that operate on and return arrays, collections, and functions can
+     * be chained together. Methods that return a boolean or single value will
+     * automatically end the chain returning the unwrapped value. Explicit chaining
+     * may be enabled using `_.chain`. The execution of chained methods is lazy,
+     * that is, execution is deferred until `_#value` is implicitly or explicitly
+     * called.
+     *
+     * Lazy evaluation allows several methods to support shortcut fusion. Shortcut
+     * fusion is an optimization that merges iteratees to avoid creating intermediate
+     * arrays and reduce the number of iteratee executions.
      *
      * Chaining is supported in custom builds as long as the `_#value` method is
      * directly or indirectly included in the build.
@@ -1023,7 +1035,12 @@
      * `concat`, `join`, `pop`, `push`, `reverse`, `shift`, `slice`, `sort`, `splice`,
      * and `unshift`
      *
-     * The wrapper functions that are chainable by default are:
+     * The wrapper functons that support shortcut fusion are:
+     * `drop`, `dropRight`, `dropRightWhile`, `dropWhile`, `filter`, `first`,
+     * `initial`, `last`, `map`, `pluck`, `reject`, `rest`, `reverse`, `slice`,
+     * `take`, `takeRight`, `takeRightWhile`, `takeWhile`, and `where`
+     *
+     * The chainable wrapper functions are:
      * `after`, `ary`, `assign`, `at`, `before`, `bind`, `bindAll`, `bindKey`,
      * `callback`, `chain`, `chunk`, `compact`, `concat`, `constant`, `countBy`,
      * `create`, `curry`, `debounce`, `defaults`, `defer`, `delay`, `difference`,
@@ -1040,7 +1057,7 @@
      * `union`, `uniq`, `unshift`, `unzip`, `values`, `valuesIn`, `where`,
      * `without`, `wrap`, `xor`, `zip`, and `zipObject`
      *
-     * The wrapper functions that are non-chainable by default are:
+     * The wrapper functions that are **not** chainable by default are:
      * `attempt`, `camelCase`, `capitalize`, `clone`, `cloneDeep`, `deburr`,
      * `endsWith`, `escape`, `escapeRegExp`, `every`, `find`, `findIndex`, `findKey`,
      * `findLast`, `findLastIndex`, `findLastKey`, `findWhere`, `first`, `has`,
@@ -1573,6 +1590,19 @@
     /*------------------------------------------------------------------------*/
 
     /**
+     * Converts an `arguments` object to a plain `Object` object.
+     *
+     * @private
+     * @param {Object} args The `arguments` object to convert.
+     * @returns {Object} Returns the new converted object.
+     */
+    function argsToObject(args) {
+      var result = { 'length': 0 };
+      push.apply(result, args);
+      return result;
+    }
+
+    /**
      * A specialized version of `_.max` for arrays without support for iteratees.
      *
      * @private
@@ -1647,7 +1677,7 @@
 
     /**
      * The base implementation of `_.assign` without support for argument juggling,
-     * multiple sources, and `this` binding.
+     * multiple sources, and `this` binding `customizer` functions.
      *
      * @private
      * @param {Object} object The destination object.
@@ -1695,6 +1725,47 @@
         }
       }
       return result;
+    }
+
+    /**
+     * The base implementation of `binaryIndex`, without support for invoking
+     * `iteratee` for `value`, which supports large arrays and determining the
+     * insert index for `NaN` and `undefined`.
+     *
+     * @private
+     * @param {Array} array The sorted array to inspect.
+     * @param {*} value The value to evaluate.
+     * @param {Function} iteratee The function invoked per iteration.
+     * @param {boolean} [retHighest=false] Specify returning the highest, instead
+     *  of the lowest, index at which a value should be inserted into `array`.
+     * @returns {number} Returns the index at which `value` should be inserted
+     *  into `array`.
+     */
+    function baseBinaryIndex(array, value, iteratee, retHighest) {
+      var low = 0,
+          high = array ? array.length : low,
+          valIsNaN = value !== value,
+          valIsUndef = typeof value == 'undefined';
+
+      while (low < high) {
+        var mid = floor((low + high) / 2),
+            computed = iteratee(array[mid]),
+            isReflexive = computed === computed;
+
+        if (valIsNaN) {
+          var setLow = isReflexive || retHighest;
+        } else if (valIsUndef) {
+          setLow = isReflexive && (retHighest || typeof computed != 'undefined');
+        } else {
+          setLow = retHighest ? (computed <= value) : (computed < value);
+        }
+        if (setLow) {
+          low = mid + 1;
+        } else {
+          high = mid;
+        }
+      }
+      return nativeMin(high, MAX_ARRAY_INDEX);
     }
 
     /**
@@ -1783,7 +1854,7 @@
 
     /**
      * The base implementation of `_.clone` without support for argument juggling
-     * and `this` binding.
+     * and `this` binding `customizer` functions.
      *
      * @private
      * @param {*} value The value to clone.
@@ -2180,8 +2251,8 @@
     }
 
     /**
-     * The base implementation of `_.isEqual`, without support for `thisArg`
-     * binding, which allows partial "_.where" style comparisons.
+     * The base implementation of `_.isEqual` without support for `this` binding
+     * `customizer` functions.
      *
      * @private
      * @param {*} value The value to compare to `other`.
@@ -2193,10 +2264,6 @@
      * @returns {boolean} Returns `true` if the values are equivalent, else `false`.
      */
     function baseIsEqual(value, other, customizer, isWhere, stackA, stackB) {
-      var result = (customizer && !stackA) ? customizer(value, other) : undefined;
-      if (typeof result != 'undefined') {
-        return !!result;
-      }
       // Exit early for identical values.
       if (value === other) {
         // Treat `+0` vs. `-0` as not equal.
@@ -2206,115 +2273,64 @@
           othType = typeof other;
 
       // Exit early for unlike primitive values.
-      if (!(valType == 'number' && othType == 'number') && (value == null || other == null ||
-          (valType != 'function' && valType != 'object' && othType != 'function' && othType != 'object'))) {
-        return false;
+      if ((valType != 'function' && valType != 'object' && othType != 'function' && othType != 'object') ||
+          value == null || other == null) {
+        // Return `false` unless both values are `NaN`.
+        return value !== value && other !== other;
       }
-      var valClass = toString.call(value),
-          valIsArg = valClass == argsClass,
-          othClass = toString.call(other),
-          othIsArg = othClass == argsClass;
+      return baseIsEqualDeep(value, other, baseIsEqual, customizer, isWhere, stackA, stackB);
+    }
 
-      if (valIsArg) {
-        valClass = objectClass;
+    /**
+     * A specialized version of `baseIsEqual`, for arrays and objects only, which
+     * performs a deep comparison between objects and tracks traversed objects
+     * enabling objects with circular references to be compared.
+     *
+     * @private
+     * @param {Array} object The object to compare to `other`.
+     * @param {Array} other The object to compare to `value`.
+     * @param {Function} equalFunc The function to determine equivalents of arbitrary values.
+     * @param {Function} [customizer] The function to customize comparing objects.
+     * @param {boolean} [isWhere=false] Specify performing partial comparisons.
+     * @param {Array} [stackA=[]] Tracks traversed `value` objects.
+     * @param {Array} [stackB=[]] Tracks traversed `other` objects.
+     * @returns {boolean} Returns `true` if the objects are equivalent, else `false`.
+     */
+    function baseIsEqualDeep(object, other, equalFunc, customizer, isWhere, stackA, stackB) {
+      var objClass = isArray(object) ? arrayClass : toString.call(object),
+          objIsArg = objClass == argsClass,
+          objIsArr = !objIsArg && arrayLikeClasses[objClass],
+          othClass = isArray(other) ? arrayClass : toString.call(other),
+          othIsArg = othClass == argsClass,
+          othIsArr = !othIsArg && arrayLikeClasses[othClass];
+
+      if (!lodash.support.argsClass) {
+        objIsArg = !objIsArr && typeof object.length == 'number' && isArguments(object);
+        othIsArg = !othIsArr && typeof other.length == 'number' && isArguments(other);
+      }
+      if (objIsArg) {
+        object = argsToObject(object);
+        objClass = objectClass;
       }
       if (othIsArg) {
+        other = argsToObject(other);
         othClass = objectClass;
       }
-      var valIsArr = arrayLikeClasses[valClass],
-          valIsErr = valClass == errorClass,
-          valIsObj = valClass == objectClass && !isHostObject(value),
-          othIsObj = othClass == objectClass && !isHostObject(other);
+      var objIsObj = objClass == objectClass && !isHostObject(object),
+          othIsObj = othClass == objectClass && !isHostObject(other),
+          isSameClass = objClass == othClass;
 
-      var isSameClass = valClass == othClass;
-      if (isSameClass && valIsArr) {
-        var valLength = value.length,
-            othLength = other.length;
-
-        if (valLength != othLength && !(isWhere && othLength > valLength)) {
-          return false;
-        }
+      if (isSameClass && !(objIsArr || objIsObj)) {
+        return equalByClass(object, other, objClass);
       }
-      else {
-        // Unwrap `lodash` wrapped values.
-        var valWrapped = valIsObj && hasOwnProperty.call(value, '__wrapped__'),
-            othWrapped = othIsObj && hasOwnProperty.call(other, '__wrapped__');
+      var valWrapped = objIsObj && hasOwnProperty.call(object, '__wrapped__'),
+          othWrapped = othIsObj && hasOwnProperty.call(other, '__wrapped__');
 
-        if (valWrapped || othWrapped) {
-          return baseIsEqual(valWrapped ? value.value() : value, othWrapped ? other.value() : other, customizer, isWhere, stackA, stackB);
-        }
-        if (!isSameClass) {
-          return false;
-        }
-        if (valIsErr || valIsObj) {
-          if (!lodash.support.argsClass) {
-            valIsArg = isArguments(value);
-            othIsArg = isArguments(other);
-          }
-          // In older versions of Opera, `arguments` objects have `Array` constructors.
-          var valCtor = valIsArg ? Object : value.constructor,
-              othCtor = othIsArg ? Object : other.constructor;
-
-          if (valIsErr) {
-            // Error objects of different types are not equal.
-            if (valCtor.prototype.name != othCtor.prototype.name) {
-              return false;
-            }
-          }
-          else {
-            var valHasCtor = !valIsArg && hasOwnProperty.call(value, 'constructor'),
-                othHasCtor = !othIsArg && hasOwnProperty.call(other, 'constructor');
-
-            if (valHasCtor != othHasCtor) {
-              return false;
-            }
-            if (!valHasCtor) {
-              // Non `Object` object instances with different constructors are not equal.
-              if (valCtor != othCtor && ('constructor' in value && 'constructor' in other) &&
-                  !(typeof valCtor == 'function' && valCtor instanceof valCtor &&
-                    typeof othCtor == 'function' && othCtor instanceof othCtor)) {
-                return false;
-              }
-            }
-          }
-          var valProps = valIsErr ? ['message', 'name'] : keys(value),
-              othProps = valIsErr ? valProps : keys(other);
-
-          if (valIsArg) {
-            valProps.push('length');
-          }
-          if (othIsArg) {
-            othProps.push('length');
-          }
-          valLength = valProps.length;
-          othLength = othProps.length;
-          if (valLength != othLength && !isWhere) {
-            return false;
-          }
-        }
-        else {
-          switch (valClass) {
-            case boolClass:
-            case dateClass:
-              // Coerce dates and booleans to numbers, dates to milliseconds and booleans
-              // to `1` or `0` treating invalid dates coerced to `NaN` as not equal.
-              return +value == +other;
-
-            case numberClass:
-              // Treat `NaN` vs. `NaN` as equal.
-              return (value != +value)
-                ? other != +other
-                // But, treat `-0` vs. `+0` as not equal.
-                : (value == 0 ? ((1 / value) == (1 / other)) : value == +other);
-
-            case regexpClass:
-            case stringClass:
-              // Coerce regexes to strings (http://es5.github.io/#x15.10.6.4) and
-              // treat strings primitives and string objects as equal.
-              return value == String(other);
-          }
-          return false;
-        }
+      if (valWrapped || othWrapped) {
+        return equalFunc(valWrapped ? object.value() : object, othWrapped ? other.value() : other, customizer, isWhere, stackA, stackB);
+      }
+      if (!isSameClass) {
+        return false;
       }
       // Assume cyclic structures are equal.
       // The algorithm for detecting cyclic structures is adapted from ES 5.1
@@ -2322,63 +2338,28 @@
       stackA || (stackA = []);
       stackB || (stackB = []);
 
-      var index = stackA.length;
-      while (index--) {
-        if (stackA[index] == value) {
-          return stackB[index] == other;
+      var length = stackA.length;
+      while (length--) {
+        if (stackA[length] == object) {
+          return stackB[length] == other;
         }
       }
-      // Add `value` and `other` to the stack of traversed objects.
-      stackA.push(value);
+      // Add `object` and `other` to the stack of traversed objects.
+      stackA.push(object);
       stackB.push(other);
 
       // Recursively compare objects and arrays (susceptible to call stack limits).
-      result = true;
-      if (valIsArr) {
-        // Deep compare the contents, ignoring non-numeric properties.
-        while (result && ++index < valLength) {
-          var valValue = value[index];
-          if (isWhere) {
-            var othIndex = othLength;
-            while (othIndex--) {
-              result = baseIsEqual(valValue, other[othIndex], customizer, isWhere, stackA, stackB);
-              if (result) {
-                break;
-              }
-            }
-          } else {
-            var othValue = other[index];
-            result = customizer ? customizer(valValue, othValue, index) : undefined;
-            if (typeof result == 'undefined') {
-              result = baseIsEqual(valValue, othValue, customizer, isWhere, stackA, stackB);
-            }
-          }
-        }
-      }
-      else {
-        while (result && ++index < valLength) {
-          var key = valProps[index];
-          result = valIsErr || hasOwnProperty.call(other, key);
+      var result = (objIsArr ? equalArrays : equalObjects)(object, other, equalFunc, customizer, isWhere, stackA, stackB);
 
-          if (result) {
-            valValue = value[key];
-            othValue = other[key];
-            result = customizer ? customizer(valValue, othValue, key) : undefined;
-            if (typeof result == 'undefined') {
-              result = baseIsEqual(valValue, othValue, customizer, isWhere, stackA, stackB);
-            }
-          }
-        }
-      }
       stackA.pop();
       stackB.pop();
 
-      return !!result;
+      return result;
     }
 
     /**
      * The base implementation of `_.invoke` which requires additional arguments
-     * be provided as an array of arguments rather than individually.
+     * to be provided as an array of arguments rather than individually.
      *
      * @private
      * @param {Array|Object|string} collection The collection to iterate over.
@@ -2420,7 +2401,7 @@
 
     /**
      * The base implementation of `_.merge` without support for argument juggling,
-     * multiple sources, and `this` binding.
+     * multiple sources, and `this` binding `customizer` functions.
      *
      * @private
      * @param {Object} object The destination object.
@@ -2575,49 +2556,6 @@
     }
 
     /**
-     * The base implementation of `_.sortedIndex` and `_.sortedLastIndex` without
-     * support for callback shorthands and `this` binding.
-     *
-     * @private
-     * @param {Array} array The array to inspect.
-     * @param {*} value The value to evaluate.
-     * @param {Function} iteratee The function invoked per iteration.
-     * @param {boolean} [retHighest=false] Specify returning the highest, instead
-     *  of the lowest, index at which a value should be inserted into `array`.
-     * @returns {number} Returns the index at which `value` should be inserted
-     *  into `array`.
-     */
-    function baseSortedIndex(array, value, iteratee, retHighest) {
-      var low = 0,
-          high = array ? array.length : low;
-
-      value = iteratee(value);
-
-      var valIsNaN = value !== value,
-          valIsUndef = typeof value == 'undefined';
-
-      while (low < high) {
-        var mid = floor((low + high) / 2),
-            computed = iteratee(array[mid]),
-            isReflexive = computed === computed;
-
-        if (valIsNaN) {
-          var setLow = isReflexive || retHighest;
-        } else if (valIsUndef) {
-          setLow = isReflexive && (retHighest || typeof computed != 'undefined');
-        } else {
-          setLow = retHighest ? (computed <= value) : (computed < value);
-        }
-        if (setLow) {
-          low = mid + 1;
-        } else {
-          high = mid;
-        }
-      }
-      return nativeMin(high, MAX_ARRAY_INDEX);
-    }
-
-    /**
      * The base implementation of `_.uniq` without support for callback shorthands
      * and `this` binding.
      *
@@ -2718,6 +2656,42 @@
         result = object[action.name].apply(object, args);
       }
       return result;
+    }
+
+    /**
+     * Performs a binary search of `array` to determine the index at which `value`
+     * should be inserted into `array` in order to maintain its sort order. The
+     * iteratee function is invoked for `value` and each element of `array` to
+     * compute their sort ranking. The iteratee is invoked with one argument; (value).
+     *
+     * @private
+     * @param {Array} array The sorted array to inspect.
+     * @param {*} value The value to evaluate.
+     * @param {Function} iteratee The function invoked per iteration.
+     * @param {boolean} [retHighest=false] Specify returning the highest, instead
+     *  of the lowest, index at which a value should be inserted into `array`.
+     * @returns {number} Returns the index at which `value` should be inserted
+     *  into `array`.
+     */
+    function binaryIndex(array, value, iteratee, retHighest) {
+      var low = 0,
+          high = array ? array.length : low;
+
+      value = iteratee(value);
+      if (value !== value || typeof value == 'undefined' || high > HALF_MAX_ARRAY_LENGTH) {
+        return baseBinaryIndex(array, value, iteratee, retHighest);
+      }
+      while (low < high) {
+        var mid = (low + high) >>> 1,
+            computed = iteratee(array[mid]);
+
+        if (retHighest ? (computed <= value) : (computed < value)) {
+          low = mid + 1;
+        } else {
+          high = mid;
+        }
+      }
+      return high;
     }
 
     /**
@@ -3167,6 +3141,153 @@
       }
       var setter = data ? baseSetData : setData;
       return setter(result, newData);
+    }
+
+    /**
+     * A specialized version of `baseIsEqualDeep`, for arrays-only, which allows
+     * partial "_.where" style comparisons.
+     *
+     * @private
+     * @param {Array} array The array to compare to `other`.
+     * @param {Array} other The array to compare to `value`.
+     * @param {Function} equalFunc The function to determine equivalents of arbitrary values.
+     * @param {Function} [customizer] The function to customize comparing arrays.
+     * @param {boolean} [isWhere=false] Specify performing partial comparisons.
+     * @param {Array} [stackA=[]] Tracks traversed `value` objects.
+     * @param {Array} [stackB=[]] Tracks traversed `other` objects.
+     * @returns {boolean} Returns `true` if the arrays are equivalent, else `false`.
+     */
+    function equalArrays(array, other, equalFunc, customizer, isWhere, stackA, stackB) {
+      var index = -1,
+          arrLength = array.length,
+          othLength = other.length,
+          result = true;
+
+      if (arrLength != othLength && !(isWhere && othLength > arrLength)) {
+        return false;
+      }
+      // Deep compare the contents, ignoring non-numeric properties.
+      while (result && ++index < arrLength) {
+        var arrValue = array[index];
+        if (isWhere) {
+          var othIndex = othLength;
+          while (othIndex--) {
+            var othValue = other[othIndex];
+            result = (arrValue && arrValue === othValue) || equalFunc(arrValue, othValue, customizer, isWhere, stackA, stackB);
+            if (result) {
+              break;
+            }
+          }
+        } else {
+          var othValue = other[index];
+          result = customizer ? customizer(arrValue, othValue, index) : undefined;
+          if (typeof result == 'undefined') {
+            result = (arrValue && arrValue === othValue) || equalFunc(arrValue, othValue, customizer, isWhere, stackA, stackB);
+          }
+        }
+      }
+      return result;
+    }
+
+    /**
+     * A specialized version of `baseIsEqualDeep` for comparing objects of
+     * the same `[[Class]]`.
+     *
+     * **Note:** This function only supports comparing values with `[[Class]]`
+     * values of `Boolean`, `Date`, `Error`, `Number`, `RegExp`, or `String`.
+     *
+     * @private
+     * @param {Object} value The object to compare to `other`.
+     * @param {Object} other The object to compare to `object`.
+     * @param {string} className The `[[Class]]` of the objects to compare.
+     * @returns {boolean} Returns `true` if the objects are equivalent, else `false`.
+     */
+    function equalByClass(object, other, className) {
+      switch (className) {
+        case boolClass:
+        case dateClass:
+          // Coerce dates and booleans to numbers, dates to milliseconds and booleans
+          // to `1` or `0` treating invalid dates coerced to `NaN` as not equal.
+          return +object == +other;
+
+        case errorClass:
+          return object.name == other.name && object.message == other.message;
+
+        case numberClass:
+          // Treat `NaN` vs. `NaN` as equal.
+          return (object != +object)
+            ? other != +other
+            // But, treat `-0` vs. `+0` as not equal.
+            : (object == 0 ? ((1 / object) == (1 / other)) : object == +other);
+
+        case regexpClass:
+        case stringClass:
+          // Coerce regexes to strings (http://es5.github.io/#x15.10.6.4) and
+          // treat strings primitives and string objects as equal.
+          return object == String(other);
+      }
+      return false;
+    }
+
+    /**
+     * A specialized version of `baseIsEqualDeep`, for objects-only, which allows
+     * partial "_.where" style comparisons.
+     *
+     * @private
+     * @param {Object} object The object to compare to `other`.
+     * @param {Object} other The object to compare to `value`.
+     * @param {Function} equalFunc The function to determine equivalents of arbitrary values.
+     * @param {Function} [customizer] The function to customize comparing values.
+     * @param {boolean} [isWhere=false] Specify performing partial comparisons.
+     * @param {Array} [stackA=[]] Tracks traversed `value` objects.
+     * @param {Array} [stackB=[]] Tracks traversed `other` objects.
+     * @returns {boolean} Returns `true` if the objects are equivalent, else `false`.
+     */
+    function equalObjects(object, other, equalFunc, customizer, isWhere, stackA, stackB) {
+      var objProps = keys(object),
+          objLength = objProps.length,
+          othProps = keys(other),
+          othLength = othProps.length;
+
+      if (objLength != othLength && !isWhere) {
+        return false;
+      }
+      var objHasCtor,
+          othHasCtor,
+          index = -1;
+
+      while (++index < objLength) {
+        var key = objProps[index],
+            result = hasOwnProperty.call(other, key);
+
+        if (result) {
+          var objValue = object[key],
+              othValue = other[key];
+
+          result = customizer ? customizer(objValue, othValue, key) : undefined;
+          if (typeof result == 'undefined') {
+            result = (objValue && objValue === othValue) || equalFunc(objValue, othValue, customizer, isWhere, stackA, stackB);
+          }
+        }
+        if (!result) {
+          return result;
+        }
+        objHasCtor || (objHasCtor = key == 'constructor');
+        othHasCtor || (othHasCtor = key == 'constructor');
+      }
+      if (objHasCtor != othHasCtor) {
+        return false;
+      }
+      // In older versions of Opera, `arguments` objects have `Array` constructors.
+      var objCtor = object.constructor,
+          othCtor = other.constructor;
+
+      // Non `Object` object instances with different constructors are not equal.
+      if (!objHasCtor && objCtor != othCtor && ('constructor' in object && 'constructor' in other) &&
+          !(typeof objCtor == 'function' && objCtor instanceof objCtor && typeof othCtor == 'function' && othCtor instanceof othCtor)) {
+        return false;
+      }
+      return true;
     }
 
     /**
@@ -4315,9 +4436,8 @@
      *
      * **Notes:**
      *  - Unlike `_.without`, this method mutates `array`.
-     *  - `SameValueZero` comparisons are like strict equality comparisons,
-     *    e.g. `===`, except that `NaN` matches `NaN`. See the
-     *    [ES6 spec](https://people.mozilla.org/~jorendorff/es6-draft.html#sec-samevaluezero)
+     *  - `SameValueZero` comparisons are like strict equality comparisons, e.g. `===`,
+     *    except that `NaN` matches `NaN`. See the [ES6 spec](https://people.mozilla.org/~jorendorff/es6-draft.html#sec-samevaluezero)
      *    for more details.
      *
      * @static
@@ -4495,11 +4615,11 @@
     }
 
     /**
-     * Uses a binary search to determine the lowest index at which a value should
-     * be inserted into a given sorted array in order to maintain the sort order
-     * of the array. If an iteratee function is provided it is invoked for `value`
-     * and each element of `array` to compute their sort ranking. The iteratee
-     * is bound to `thisArg` and invoked with one argument; (value).
+     * Uses a binary search to determine the lowest index at which `value` should
+     * be inserted into `array` in order to maintain its sort order. If an iteratee
+     * function is provided it is invoked for `value` and each element of `array`
+     * to compute their sort ranking. The iteratee is bound to `thisArg` and
+     * invoked with one argument; (value).
      *
      * If a property name is provided for `iteratee` the created "_.pluck" style
      * callback returns the property value of the given element.
@@ -4511,7 +4631,7 @@
      * @static
      * @memberOf _
      * @category Array
-     * @param {Array} array The array to inspect.
+     * @param {Array} array The sorted array to inspect.
      * @param {*} value The value to evaluate.
      * @param {Function|Object|string} [iteratee=_.identity] The function invoked
      *  per iteration. If a property name or object is provided it is used to
@@ -4541,18 +4661,18 @@
      */
     function sortedIndex(array, value, iteratee, thisArg) {
       iteratee = iteratee == null ? identity : getCallback(iteratee, thisArg, 1);
-      return baseSortedIndex(array, value, iteratee);
+      return binaryIndex(array, value, iteratee);
     }
 
     /**
      * This method is like `_.sortedIndex` except that it returns the highest
-     * index at which a value should be inserted into a given sorted array in
-     * order to maintain the sort order of the array.
+     * index at which `value` should be inserted into `array` in order to
+     * maintain its sort order.
      *
      * @static
      * @memberOf _
      * @category Array
-     * @param {Array} array The array to inspect.
+     * @param {Array} array The sorted array to inspect.
      * @param {*} value The value to evaluate.
      * @param {Function|Object|string} [iteratee=_.identity] The function invoked
      *  per iteration. If a property name or object is provided it is used to
@@ -4567,7 +4687,7 @@
      */
     function sortedLastIndex(array, value, iteratee, thisArg) {
       iteratee = iteratee == null ? identity : getCallback(iteratee, thisArg, 1);
-      return baseSortedIndex(array, value, iteratee, true);
+      return binaryIndex(array, value, iteratee, true);
     }
 
     /**
@@ -7536,9 +7656,11 @@
      */
     function isEqual(value, other, customizer, thisArg) {
       customizer = typeof customizer == 'function' && baseCallback(customizer, thisArg, 3);
-      return (!customizer && isStrictComparable(value) && isStrictComparable(other))
-        ? value === other
-        : baseIsEqual(value, other, customizer);
+      if (!customizer && isStrictComparable(value) && isStrictComparable(other)) {
+        return value === other;
+      }
+      var result = customizer ? customizer(value, other) : undefined;
+      return typeof result == 'undefined' ? baseIsEqual(value, other, customizer) : !!result;
     }
 
     /**
@@ -7559,7 +7681,7 @@
      * // => false
      */
     function isError(value) {
-      return (isObjectLike(value) && toString.call(value) == errorClass) || false;
+      return (isObjectLike(value) && typeof value.message == 'string' && toString.call(value) == errorClass) || false;
     }
 
     /**
@@ -7884,7 +8006,7 @@
      * @returns {Object} Returns the destination object.
      * @example
      *
-     * _.assign({ 'user': 'fred' }, { 'age': 40 }, { 'status': 'busy' });
+     * _.assign({ 'user': 'barney' }, { 'age': 40 }, { 'user': 'fred', 'status': 'busy' });
      * // => { 'user': 'fred', 'age': 40, 'status': 'busy' }
      *
      * var defaults = _.partialRight(_.assign, function(value, other) {
@@ -7940,9 +8062,6 @@
      * Assigns own enumerable properties of source object(s) to the destination
      * object for all destination properties that resolve to `undefined`. Once a
      * property is set, additional defaults of the same property are ignored.
-     *
-     * **Note:** See the [documentation example of `_.partialRight`](https://lodash.com/docs#partialRight)
-     * for a deep version of this method.
      *
      * @static
      * @memberOf _
@@ -8796,7 +8915,7 @@
     function escape(string) {
       // Reset `lastIndex` because in IE < 9 `String#replace` does not.
       string = string == null ? '' : String(string);
-      return string && (reUnescapedHtml.lastIndex = 0, reUnescapedHtml.test(string))
+      return (string && reHasUnescapedHtml.test(string))
         ? string.replace(reUnescapedHtml, escapeHtmlChar)
         : string;
     }
@@ -8817,7 +8936,7 @@
      */
     function escapeRegExp(string) {
       string = string == null ? '' : String(string);
-      return string && (reRegExpChars.lastIndex = 0, reRegExpChars.test(string))
+      return (string && reHasRegExpChars.test(string))
         ? string.replace(reRegExpChars, '\\$&')
         : string;
     }
@@ -9162,8 +9281,11 @@
 
       // Use a sourceURL for easier debugging.
       // See http://www.html5rocks.com/en/tutorials/developertools/sourcemaps/#toc-sourceurl.
-      var sourceURL = 'sourceURL' in options ? options.sourceURL : ('/lodash/template/source[' + (++templateCounter) + ']');
-      sourceURL = sourceURL ? ('//# sourceURL=' + sourceURL + '\n') : '';
+      var sourceURL = '//# sourceURL=' +
+        ('sourceURL' in options
+          ? options.sourceURL
+          : ('/lodash/template/source[' + (++templateCounter) + ']')
+        ) + '\n';
 
       string.replace(reDelimiters, function(match, escapeValue, interpolateValue, esTemplateValue, evaluateValue, offset) {
         interpolateValue || (interpolateValue = esTemplateValue);
@@ -9428,7 +9550,7 @@
      */
     function unescape(string) {
       string = string == null ? '' : String(string);
-      return string && (reEscapedHtml.lastIndex = 0, reEscapedHtml.test(string))
+      return (string && reHasEscapedHtml.test(string))
         ? string.replace(reEscapedHtml, unescapeHtmlChar)
         : string;
     }
@@ -9991,11 +10113,10 @@
     }
 
     /**
-     * Resolves the value of property `key` on `object`. If `key` is a function
-     * it is invoked with the `this` binding of `object` and its result returned,
-     * else the property value is returned. If `object` is `null` or `undefined`
-     * then `undefined` is returned. If a default value is provided it is returned
-     * if the property value resolves to `undefined`.
+     * Resolves the value of property `key` on `object`. If the value of `key` is
+     * a function it is invoked with the `this` binding of `object` and its result
+     * is returned, else the property value is returned. If the property value is
+     * `undefined` the `defaultValue` is used in its place.
      *
      * @static
      * @memberOf _
@@ -10007,12 +10128,7 @@
      * @returns {*} Returns the resolved value.
      * @example
      *
-     * var object = {
-     *   'user': 'fred',
-     *   'age': function() {
-     *     return 40;
-     *   }
-     * };
+     * var object = { 'user': 'fred', 'age': _.constant(40) };
      *
      * _.result(object, 'user');
      * // => 'fred'
@@ -10022,13 +10138,16 @@
      *
      * _.result(object, 'status', 'busy');
      * // => 'busy'
+     *
+     * _.result(object, 'status', _.constant('busy'));
+     * // => 'busy'
      */
     function result(object, key, defaultValue) {
       var value = object == null ? undefined : object[key];
       if (typeof value == 'undefined') {
-        return defaultValue;
+        value = defaultValue;
       }
-      return isFunction(value) ? object[key]() : value;
+      return isFunction(value) ? value.call(object) : value;
     }
 
     /**
